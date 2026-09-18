@@ -6,7 +6,7 @@ set -uo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
-MODEL="${SHIT_MODEL:-qwen2.5:0.5b}"
+MODEL="${SHIT_MODEL:-qwen2.5-coder:3b}"
 
 echo "Installing shit-cli to $BIN_DIR ..."
 mkdir -p "$BIN_DIR"

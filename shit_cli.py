@@ -38,7 +38,7 @@ import urllib.error
 import urllib.request
 
 OLLAMA_URL = os.environ.get("SHIT_OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL = os.environ.get("SHIT_MODEL", "qwen2.5:0.5b")
+MODEL = os.environ.get("SHIT_MODEL", "qwen2.5-coder:3b")
 RERUN_TIMEOUT = float(os.environ.get("SHIT_RERUN_TIMEOUT", "5"))
 LLM_TIMEOUT = float(os.environ.get("SHIT_LLM_TIMEOUT", "30"))
 MAX_OUTPUT_CHARS = 1500
@@ -352,7 +352,7 @@ def ask_ollama(prompt):
         "prompt": prompt,
         "stream": False,
         "format": RESPONSE_SCHEMA,
-        "options": {"temperature": 0.2, "num_predict": 200},
+        "options": {"temperature": 0.2, "num_predict": 320},
     }).encode("utf-8")
 
     req = urllib.request.Request(

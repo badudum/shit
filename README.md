@@ -70,7 +70,8 @@ system-wide. It:
 - runs it as a `systemd --user` service so it's there after reboots/logins
   without needing root (falls back to a plain background process if your
   system has no user systemd instance)
-- pulls a small model (`qwen2.5:0.5b` by default, ~400MB)
+- pulls a small model for the LLM fallback (`qwen2.5-coder:3b` by default,
+  ~1.9GB)
 
 Safe to re-run any time - every step is skipped if it's already done.
 
@@ -82,10 +83,28 @@ All optional, set as env vars before sourcing (e.g. in `.bashrc`):
 
 | Variable              | Default                   | What it does                          |
 |------------------------|----------------------------|----------------------------------------|
-| `SHIT_MODEL`           | `qwen2.5:0.5b`             | Ollama model to use                    |
+| `SHIT_MODEL`           | `qwen2.5-coder:3b`         | Ollama model to use for the LLM fallback |
 | `SHIT_OLLAMA_URL`      | `http://127.0.0.1:11434`   | Ollama API base URL                    |
 | `SHIT_RERUN_TIMEOUT`   | `5`                        | Seconds before giving up re-running the failed command |
 | `SHIT_LLM_TIMEOUT`     | `30`                       | Seconds to wait for the model's response |
+
+Since the deterministic layer (see above) already resolves most typo'd
+commands without ever calling the model, the LLM is only in the critical
+path for genuinely ambiguous/complex cases - so it's worth spending a
+bigger, slower-but-smarter model there rather than optimizing purely for
+speed. On this tradeoff:
+- `qwen2.5-coder:1.5b` (~1GB) - if you want something lighter/faster and
+  can live with a lower ceiling on complex commands.
+- `qwen2.5-coder:3b` (~1.9GB, default) - clearly outperforms smaller models
+  on longer, multi-flag commands and subtle mistakes (e.g. correctly fixing
+  a missing `find ... -exec ... +` terminator or a malformed
+  `-H "Authorization Bear TOKEN"` curl header) while still running in a
+  few seconds on a modern CPU.
+- `qwen2.5-coder:7b` (~4.7GB) - best accuracy if you don't mind ~5-10s+ per
+  LLM call (CPU-only) and have the RAM to spare.
+
+To switch: `ollama pull <model>` then `export SHIT_MODEL=<model>` in your
+shell rc file (after the `source .../shell/integration.sh` line).
 
 Want a bit more accuracy and don't mind ~1GB instead of ~400MB?
 `SHIT_MODEL=qwen2.5:1.5b ollama pull qwen2.5:1.5b` and set the env var.
