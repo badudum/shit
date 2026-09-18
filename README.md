@@ -24,9 +24,8 @@ right there. Ctrl+C cancels.
    stdout/stderr (skipped for anything that looks destructive - `rm`, `sudo`,
    `git push --force`, `DELETE`/`POST` curls, etc. - see `DANGEROUS_PATTERNS`
    in `shit_cli.py`).
-3. Before ever asking a model, it tries three cheap, deterministic tricks
-   that are both faster and more reliable for the common case of a typo'd
-   command:
+3. Three cheap, deterministic tricks run first and show up on screen
+   near-instantly, before any model is involved:
    - a short table of classic transposition typos (`sl` -> `ls`, `gerp` ->
      `grep`, ...)
    - if the program name doesn't resolve to anything real, fuzzy-matching
@@ -38,16 +37,22 @@ right there. Ctrl+C cancels.
    - parsing "did you mean"/"most similar command is" hints straight out of
      the failing tool's own error output (git, pip, cargo, apt, ... all
      self-report this already)
-4. Only if those don't add up to 3 suggestions does the command text +
-   captured output go to a small model running locally via
-   [Ollama](https://ollama.com) to fill in the rest.
-5. You pick one by number and it's `eval`'d in your current shell, so `cd`,
-   env vars, and aliases all behave normally - it's not run in a subshell.
+4. At the same time, a small model running locally via
+   [Ollama](https://ollama.com) is asked for a second opinion on a
+   background thread - it never blocks the menu you already see. A spinner
+   plays while it's thinking, and if it comes back with a suggestion that
+   isn't already on screen, that option is appended live, right where
+   you're looking.
+5. Pressing a number - no Enter needed - picks that option immediately,
+   whether the model has answered yet or not; it's never waited on. The
+   chosen command is `eval`'d in your current shell, so `cd`, env vars, and
+   aliases all behave normally - it's not run in a subshell. Ctrl+C cancels
+   at any point.
 
-For the most common case (a typo'd command) steps 1-3 alone produce all 3
-suggestions, so no model call happens at all - just near-instant, and
-grounded in what's actually installed on your machine rather than a small
-model's training-data guesses.
+For the common case (a typo'd command) steps 1-3 alone are usually enough
+that you'll pick an option before the model even answers - grounded in
+what's actually installed on your machine rather than a small model's
+training-data guesses, and free to ignore if it's wrong.
 
 Everything runs locally. Nothing you type ever leaves your machine.
 
@@ -88,11 +93,10 @@ All optional, set as env vars before sourcing (e.g. in `.bashrc`):
 | `SHIT_RERUN_TIMEOUT`   | `5`                        | Seconds before giving up re-running the failed command |
 | `SHIT_LLM_TIMEOUT`     | `30`                       | Seconds to wait for the model's response |
 
-Since the deterministic layer (see above) already resolves most typo'd
-commands without ever calling the model, the LLM is only in the critical
-path for genuinely ambiguous/complex cases - so it's worth spending a
-bigger, slower-but-smarter model there rather than optimizing purely for
-speed. On this tradeoff:
+The model always runs in the background, but since it never blocks the
+menu (see above), it's worth spending a bigger, slower-but-smarter model
+there rather than optimizing purely for speed - you'll rarely be staring
+at the spinner waiting on it. On this tradeoff:
 - `qwen2.5-coder:1.5b` (~1GB) - if you want something lighter/faster and
   can live with a lower ceiling on complex commands.
 - `qwen2.5-coder:3b` (~1.9GB, default) - clearly outperforms smaller models
@@ -106,9 +110,6 @@ speed. On this tradeoff:
 To switch: `ollama pull <model>` then `export SHIT_MODEL=<model>` in your
 shell rc file (after the `source .../shell/integration.sh` line).
 
-Want a bit more accuracy and don't mind ~1GB instead of ~400MB?
-`SHIT_MODEL=qwen2.5:1.5b ollama pull qwen2.5:1.5b` and set the env var.
-
 ## Caveats
 
 - Re-running the failed command is what powers the "read the real error"
@@ -119,3 +120,7 @@ Want a bit more accuracy and don't mind ~1GB instead of ~400MB?
   idle) is slower while the model loads into memory; after that it's fast.
 - Only pulls the previous command from shell history, so it won't work as
   the very first command in a fresh shell session.
+- The live spinner/menu needs a real terminal (both stdin and stderr as
+  ttys). Piped/non-interactive input (scripts, tests) falls back to a
+  static menu that only waits on the model if the deterministic tricks
+  found nothing at all to show yet.
