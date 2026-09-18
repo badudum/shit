@@ -32,6 +32,8 @@ import re
 import shutil
 import subprocess
 import sys
+import termios
+import tty
 import urllib.error
 import urllib.request
 
@@ -53,6 +55,45 @@ DANGEROUS_PATTERNS = [
     r"\byarn\s+publish\b", r"\bnpm\s+publish\b", r"\bgit\s+push\b.*(--force|-f\b)",
 ]
 DANGEROUS_RE = re.compile("|".join(DANGEROUS_PATTERNS), re.IGNORECASE)
+
+
+def _use_color():
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    if os.environ.get("SHIT_COLOR") == "always":
+        return True
+    return sys.stderr.isatty() and os.environ.get("TERM") != "dumb"
+
+
+COLOR = _use_color()
+
+
+def _c(code, text):
+    return f"\033[{code}m{text}\033[0m" if COLOR else text
+
+
+def bold(text):
+    return _c("1", text)
+
+
+def dim(text):
+    return _c("2", text)
+
+
+def cyan(text):
+    return _c("36", text)
+
+
+def green(text):
+    return _c("32", text)
+
+
+def yellow(text):
+    return _c("33", text)
+
+
+def red(text):
+    return _c("31", text)
 
 SYSTEM_PROMPT = (
     "You are a terminal assistant that fixes broken shell commands. "
@@ -326,18 +367,18 @@ def ask_ollama(prompt):
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
         if exc.code == 404 or "not found" in detail.lower():
-            eprint(f"shit: model '{MODEL}' isn't pulled yet.")
-            eprint(f"       run: ollama pull {MODEL}")
+            eprint(red(f"shit: model '{MODEL}' isn't pulled yet."))
+            eprint(dim(f"       run: ollama pull {MODEL}"))
         else:
-            eprint(f"shit: Ollama returned an error ({exc.code}): {detail}")
+            eprint(red(f"shit: Ollama returned an error ({exc.code}): {detail}"))
         return None
     except urllib.error.URLError as exc:
-        eprint("shit: can't reach Ollama at " + OLLAMA_URL)
-        eprint("      start it with `ollama serve` (or open the Ollama app) and try again.")
-        eprint(f"      ({exc.reason})")
+        eprint(red("shit: can't reach Ollama at " + OLLAMA_URL))
+        eprint(dim("      start it with `ollama serve` (or open the Ollama app) and try again."))
+        eprint(dim(f"      ({exc.reason})"))
         return None
     except Exception as exc:  # pragma: no cover - defensive
-        eprint(f"shit: unexpected error talking to Ollama: {exc}")
+        eprint(red(f"shit: unexpected error talking to Ollama: {exc}"))
         return None
 
     raw = payload.get("response", "")
@@ -345,7 +386,7 @@ def ask_ollama(prompt):
         parsed = json.loads(raw)
         suggestions = parsed.get("suggestions", [])
     except (json.JSONDecodeError, AttributeError):
-        eprint("shit: model returned something that wasn't valid JSON, giving up.")
+        eprint(red("shit: model returned something that wasn't valid JSON, giving up."))
         return None
 
     # Be defensive: a small model can still ignore the schema and hand back
@@ -378,30 +419,49 @@ def repair_suggestion(orig_cmd, suggestion):
     return suggestion
 
 
-def prompt_choice(suggestions):
-    eprint("\nDid you mean:")
-    for i, s in enumerate(suggestions, 1):
-        eprint(f"  {i}) {s}")
-    eprint("Type a number to run it, or anything else to cancel: ", end="")
-    sys.stderr.flush()
-    try:
+def read_key():
+    """Read a single raw keypress with no Enter required. Falls back to
+    line-buffered input when stdin isn't a real tty (e.g. piped input in
+    tests), since raw mode needs an actual terminal device."""
+    if not sys.stdin.isatty():
         line = sys.stdin.readline()
-    except KeyboardInterrupt:
-        return None
-    if not line:
-        return None
-    line = line.strip()
-    if line.isdigit():
-        idx = int(line)
-        if 1 <= idx <= len(suggestions):
-            return suggestions[idx - 1]
-    return None
+        return line[0] if line else None
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        ch = sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    return ch if ch else None
+
+
+def prompt_choice(suggestions):
+    eprint("\n" + bold("Did you mean:"))
+    for i, s in enumerate(suggestions, 1):
+        eprint(f"  {bold(cyan(str(i)))}) {green(s)}")
+    eprint(dim("Press a number to run it, Ctrl+C to cancel: "), end="")
+    sys.stderr.flush()
+
+    while True:
+        try:
+            ch = read_key()
+        except KeyboardInterrupt:
+            return None
+        if ch is None or ch in ("\x03", "\x04"):  # EOF / Ctrl+C / Ctrl+D
+            return None
+        if ch.isdigit():
+            idx = int(ch)
+            if 1 <= idx <= len(suggestions):
+                eprint(bold(cyan(ch)))  # echo back - raw mode has echo off
+                return suggestions[idx - 1]
+        # anything else: ignore and keep waiting for a valid digit
 
 
 def main():
     cmd = get_prev_command()
     if not cmd:
-        eprint("shit: couldn't figure out what your previous command was.")
+        eprint(red("shit: couldn't figure out what your previous command was."))
         return 1
 
     exit_code, output, was_rerun = rerun_capture(cmd)
@@ -429,7 +489,7 @@ def main():
 
     suggestions = suggestions[:3]
     if not suggestions:
-        eprint("shit: no suggestions available.")
+        eprint(red("shit: no suggestions available."))
         return 1
 
     choice = prompt_choice(suggestions)
@@ -437,7 +497,7 @@ def main():
         print(choice)
         return 0
 
-    eprint("shit: cancelled.")
+    eprint(yellow("\nshit: cancelled."))
     return 1
 
 
