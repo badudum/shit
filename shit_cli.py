@@ -14,10 +14,13 @@ Given the previously typed (and presumably failed) shell command, this:
        b. Look for the tool's own "did you mean" / "most similar command is"
           hint in its error output (git, pip, cargo, apt, etc. all do this)
           and trust it outright.
-  3. Only if those don't produce 3 suggestions does it ask a small local
-     Ollama model to fill in the rest.
-  4. Shows a numbered menu on stderr and reads a choice from stdin.
-  5. Prints ONLY the chosen command to stdout so the calling shell function
+  3. Shows those deterministic suggestions immediately, while a small local
+     Ollama model runs in a background thread for a second opinion - a
+     spinner plays until it answers, and any genuinely new suggestion it
+     comes back with is appended live to the menu already on screen.
+     Pressing a number at any point wins immediately; the model call is
+     never waited on.
+  4. Prints ONLY the chosen command to stdout so the calling shell function
      can eval it in the current shell (so cd, env vars, aliases etc. behave
      normally, instead of running inside this throwaway python process).
 
@@ -29,10 +32,12 @@ import difflib
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
 import termios
+import threading
 import tty
 import urllib.error
 import urllib.request
@@ -55,6 +60,10 @@ DANGEROUS_PATTERNS = [
     r"\byarn\s+publish\b", r"\bnpm\s+publish\b", r"\bgit\s+push\b.*(--force|-f\b)",
 ]
 DANGEROUS_RE = re.compile("|".join(DANGEROUS_PATTERNS), re.IGNORECASE)
+
+MAX_SUGGESTIONS = 6
+SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+SPIN_INTERVAL = 0.08
 
 
 def _use_color():
@@ -345,7 +354,15 @@ RESPONSE_SCHEMA = {
 }
 
 
-def ask_ollama(prompt):
+def ask_ollama(prompt, quiet=False):
+    """quiet=True suppresses the error eprints - used when this runs on a
+    background thread while the main thread is mid-animation, since writing
+    to stderr from both at once would corrupt the live-redrawn menu."""
+    def err(*lines):
+        if not quiet:
+            for line in lines:
+                eprint(line)
+
     body = json.dumps({
         "model": MODEL,
         "system": SYSTEM_PROMPT,
@@ -367,18 +384,19 @@ def ask_ollama(prompt):
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "ignore")
         if exc.code == 404 or "not found" in detail.lower():
-            eprint(red(f"shit: model '{MODEL}' isn't pulled yet."))
-            eprint(dim(f"       run: ollama pull {MODEL}"))
+            err(red(f"shit: model '{MODEL}' isn't pulled yet."), dim(f"       run: ollama pull {MODEL}"))
         else:
-            eprint(red(f"shit: Ollama returned an error ({exc.code}): {detail}"))
+            err(red(f"shit: Ollama returned an error ({exc.code}): {detail}"))
         return None
     except urllib.error.URLError as exc:
-        eprint(red("shit: can't reach Ollama at " + OLLAMA_URL))
-        eprint(dim("      start it with `ollama serve` (or open the Ollama app) and try again."))
-        eprint(dim(f"      ({exc.reason})"))
+        err(
+            red("shit: can't reach Ollama at " + OLLAMA_URL),
+            dim("      start it with `ollama serve` (or open the Ollama app) and try again."),
+            dim(f"      ({exc.reason})"),
+        )
         return None
     except Exception as exc:  # pragma: no cover - defensive
-        eprint(red(f"shit: unexpected error talking to Ollama: {exc}"))
+        err(red(f"shit: unexpected error talking to Ollama: {exc}"))
         return None
 
     raw = payload.get("response", "")
@@ -386,7 +404,7 @@ def ask_ollama(prompt):
         parsed = json.loads(raw)
         suggestions = parsed.get("suggestions", [])
     except (json.JSONDecodeError, AttributeError):
-        eprint(red("shit: model returned something that wasn't valid JSON, giving up."))
+        err(red("shit: model returned something that wasn't valid JSON, giving up."))
         return None
 
     # Be defensive: a small model can still ignore the schema and hand back
@@ -436,7 +454,9 @@ def read_key():
     return ch if ch else None
 
 
-def prompt_choice(suggestions):
+def prompt_choice_static(suggestions):
+    """Non-live fallback for when stdin/stderr isn't a real tty (piped
+    input, tests): show the menu once, no spinner, no background merging."""
     eprint("\n" + bold("Did you mean:"))
     for i, s in enumerate(suggestions, 1):
         eprint(f"  {bold(cyan(str(i)))}) {green(s)}")
@@ -458,6 +478,102 @@ def prompt_choice(suggestions):
         # anything else: ignore and keep waiting for a valid digit
 
 
+def start_llm_thread(prompt, cmd, quiet):
+    """Kicks off the LLM call in a daemon thread so it never blocks process
+    exit - if the user picks a suggestion before it finishes, main() just
+    returns and the OS reclaims the still-running request underneath it.
+    quiet must be True whenever a live animated menu might be on screen,
+    since the background thread's error eprints would otherwise corrupt it;
+    the non-tty fallback path can afford to show them for debuggability.
+    """
+    state = {"suggestions": None, "done": threading.Event()}
+
+    def worker():
+        try:
+            raw = ask_ollama(prompt, quiet=quiet) or []
+            state["suggestions"] = [repair_suggestion(cmd, s) for s in raw]
+        except Exception:  # pragma: no cover - defensive
+            state["suggestions"] = []
+        finally:
+            state["done"].set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    return state
+
+
+def _render_menu(suggestions, spinner_frame):
+    """Redraws the whole menu block from scratch and returns how many lines
+    it took, so the next call knows how far to move the cursor back up."""
+    lines = []
+    if suggestions:
+        lines.append(bold("Did you mean:"))
+        for i, s in enumerate(suggestions, 1):
+            lines.append(f"  {bold(cyan(str(i)))}) {green(s)}")
+    if spinner_frame is not None:
+        label = "looking for more suggestions..." if suggestions else "thinking..."
+        lines.append(dim(f"{spinner_frame} {label}"))
+    if suggestions:
+        lines.append(dim("Press a number to run it, Ctrl+C to cancel: "))
+    for line in lines:
+        eprint("\r\033[2K" + line)
+    return len(lines)
+
+
+def prompt_choice_live(suggestions, llm_state):
+    """Interactive tty version: `suggestions` (a list, mutated in place) is
+    shown immediately and a spinner animates until `llm_state['done']`
+    fires, at which point any new, non-duplicate suggestions the background
+    LLM call produced are inserted live into the same menu. A digit
+    keypress at any moment wins immediately without waiting for the model.
+    """
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    prev_lines = 0
+    merged = False
+    try:
+        tty.setcbreak(fd)
+        spin_i = 0
+        while True:
+            done = llm_state["done"].is_set()
+
+            if done and not merged:
+                merged = True
+                for s in llm_state["suggestions"] or []:
+                    if s not in suggestions and len(suggestions) < MAX_SUGGESTIONS:
+                        suggestions.append(s)
+                if not suggestions:
+                    if prev_lines:
+                        eprint(f"\033[{prev_lines}A", end="")
+                        for _ in range(prev_lines):
+                            eprint("\r\033[2K")
+                        eprint(f"\033[{prev_lines}A", end="")
+                    eprint(red("shit: no suggestions available."))
+                    return None
+
+            spinner_frame = None if done else SPINNER_FRAMES[spin_i % len(SPINNER_FRAMES)]
+            if prev_lines:
+                eprint(f"\033[{prev_lines}A", end="")
+            prev_lines = _render_menu(suggestions, spinner_frame)
+            sys.stderr.flush()
+
+            r, _, _ = select.select([fd], [], [], SPIN_INTERVAL)
+            if r:
+                ch = os.read(fd, 1).decode(errors="ignore")
+                if ch in ("\x03", "\x04", ""):  # Ctrl+C / Ctrl+D / EOF
+                    return None
+                if ch.isdigit():
+                    idx = int(ch)
+                    if 1 <= idx <= len(suggestions):
+                        eprint(bold(cyan(ch)))
+                        return suggestions[idx - 1]
+                continue
+            spin_i += 1
+    except KeyboardInterrupt:
+        return None
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
 def main():
     cmd = get_prev_command()
     if not cmd:
@@ -470,29 +586,45 @@ def main():
         if orig_exit.isdigit():
             exit_code = int(orig_exit)
 
-    def add(dest, item):
-        if item and item not in dest:
-            dest.append(item)
-
     suggestions = []
-    add(suggestions, common_typo_suggestion(cmd))
+
+    def add(item):
+        if item and item not in suggestions and len(suggestions) < MAX_SUGGESTIONS:
+            suggestions.append(item)
+
+    add(common_typo_suggestion(cmd))
     # highest confidence first: the tool told us directly what it meant
-    add(suggestions, hint_suggestion(cmd, output))
+    add(hint_suggestion(cmd, output))
     for s in unknown_command_suggestions(cmd):
-        add(suggestions, s)
+        add(s)
 
-    # only bother the LLM if the deterministic tricks didn't fill the menu
-    if len(suggestions) < 3:
-        prompt = build_prompt(cmd, exit_code, output)
-        for s in ask_ollama(prompt) or []:
-            add(suggestions, repair_suggestion(cmd, s))
+    is_tty = sys.stdin.isatty() and sys.stderr.isatty()
 
-    suggestions = suggestions[:3]
-    if not suggestions:
-        eprint(red("shit: no suggestions available."))
-        return 1
+    # Always give the LLM a shot at a second opinion - even when the
+    # deterministic tricks already found something, it may come back with a
+    # genuinely different, better answer. It runs concurrently rather than
+    # blocking, so it costs nothing but a spinner.
+    if len(suggestions) < MAX_SUGGESTIONS:
+        llm_state = start_llm_thread(build_prompt(cmd, exit_code, output), cmd, quiet=is_tty)
+    else:
+        llm_state = {"suggestions": [], "done": threading.Event()}
+        llm_state["done"].set()
 
-    choice = prompt_choice(suggestions)
+    if is_tty:
+        choice = prompt_choice_live(suggestions, llm_state)
+    else:
+        # no live menu to animate here, so there's nothing to gain by
+        # waiting on the model when the deterministic tricks already have
+        # an answer - only block on it when there's nothing else to show
+        if not suggestions:
+            llm_state["done"].wait(LLM_TIMEOUT + 2)
+            for s in llm_state["suggestions"] or []:
+                add(s)
+        if not suggestions:
+            eprint(red("shit: no suggestions available."))
+            return 1
+        choice = prompt_choice_static(suggestions)
+
     if choice:
         print(choice)
         return 0
