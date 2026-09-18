@@ -5,9 +5,19 @@ shit-cli: the brain behind the `shit` shell command.
 Given the previously typed (and presumably failed) shell command, this:
   1. Re-runs it in a subprocess to capture real stdout/stderr (skipped for
      anything that looks destructive - see DANGEROUS_PATTERNS).
-  2. Asks a small local Ollama model for up to 3 corrected commands.
-  3. Shows a numbered menu on stderr and reads a choice from stdin.
-  4. Prints ONLY the chosen command to stdout so the calling shell function
+  2. Tries two cheap, deterministic tricks first, since they're both faster
+     and more reliable than an LLM for the most common case (a typo in the
+     program name or a typo'd sub-command):
+       a. If the program name itself doesn't resolve to anything real, fuzzy
+          match it against every executable actually on $PATH (plus shell
+          builtins/aliases/functions) - the same core trick `thefuck` uses.
+       b. Look for the tool's own "did you mean" / "most similar command is"
+          hint in its error output (git, pip, cargo, apt, etc. all do this)
+          and trust it outright.
+  3. Only if those don't produce 3 suggestions does it ask a small local
+     Ollama model to fill in the rest.
+  4. Shows a numbered menu on stderr and reads a choice from stdin.
+  5. Prints ONLY the chosen command to stdout so the calling shell function
      can eval it in the current shell (so cd, env vars, aliases etc. behave
      normally, instead of running inside this throwaway python process).
 
@@ -15,6 +25,7 @@ Everything interactive (menu, errors, prompts) goes to stderr on purpose -
 stdout is reserved for the final chosen command line, and only that.
 """
 
+import difflib
 import json
 import os
 import re
@@ -94,6 +105,176 @@ def rerun_capture(cmd):
         return None, output, True
     except Exception as exc:  # pragma: no cover - defensive
         return None, f"(failed to re-run command: {exc})", False
+
+
+SHELL_BUILTINS = {
+    "cd", "pwd", "echo", "export", "alias", "unalias", "source", ".", "exit",
+    "return", "break", "continue", "shift", "test", "[", "[[", "read", "set",
+    "unset", "trap", "wait", "jobs", "fg", "bg", "kill", "type", "hash",
+    "history", "eval", "exec", "ulimit", "umask", "times", "getopts", "local",
+    "declare", "typeset", "readonly", "let", "printf", "pushd", "popd",
+    "dirs", "suspend", "command", "builtin", "enable", "complete", "compgen",
+    "shopt", "bind", "if", "then", "else", "elif", "fi", "for", "while",
+    "until", "do", "done", "case", "esac", "function", "select", "time",
+    "coproc", "in",
+}
+
+
+# The handful of transposition/muscle-memory typos so common they're worth
+# hardcoding outright rather than leaving to edit-distance ranking - plain
+# Levenshtein distance actually ranks unrelated 2-letter commands (sh, su,
+# nl...) *above* "ls" for the input "sl", since a transposition costs 2
+# substitutions but only 1 in true typo-space. `thefuck` special-cases these
+# same handful of classics for the same reason.
+COMMON_TYPOS = {
+    "sl": "ls", "s": "ls",
+    "gerp": "grep", "grpe": "grep", "gpr": "grep",
+    "got": "git", "gi": "git", "gti": "git", "igt": "git",
+    "pdw": "pwd", "pwe": "pwd",
+    "claer": "clear", "clera": "clear", "cls": "clear",
+    "mkdri": "mkdir", "mkidr": "mkdir",
+    "vmi": "vim",
+    "phtyon": "python", "pyhton": "python", "pytohn": "python",
+    "amke": "make", "mkae": "make",
+    "touhc": "touch",
+    "hsitory": "history",
+}
+
+
+def common_typo_suggestion(cmd):
+    tokens = cmd.split()
+    if not tokens:
+        return None
+    fix = COMMON_TYPOS.get(tokens[0])
+    if fix is None:
+        return None
+    return " ".join([fix] + tokens[1:])
+
+
+def path_executables():
+    """Every executable name found on $PATH - the ground truth for 'is this
+    actually a real command', independent of what an LLM thinks exists."""
+    names = set()
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    try:
+                        if entry.is_file(follow_symlinks=True) and os.access(entry.path, os.X_OK):
+                            names.add(entry.name)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return names
+
+
+def shell_known_commands():
+    """Aliases/functions the shell wrapper exported for us, if any."""
+    raw = os.environ.get("SHIT_KNOWN_CMDS", "")
+    return {c for c in raw.split("\n") if c.strip()}
+
+
+def is_real_command(word):
+    return (
+        shutil.which(word) is not None
+        or word in SHELL_BUILTINS
+        or word in shell_known_commands()
+    )
+
+
+def history_rank():
+    """Commands this user actually runs, most-frequent first (the shell
+    wrapper exports this from `history`). Plain edit distance can't tell
+    "yay" and "cat" apart for the input "yat" - they're both 1 edit away -
+    but this user's own history can: whichever one they actually run wins
+    the tie. Returns {command: rank}, lower rank = used more often.
+    """
+    raw = os.environ.get("SHIT_HISTORY_CMDS", "")
+    return {c: i for i, c in enumerate(x for x in raw.split("\n") if x.strip())}
+
+
+def levenshtein(a, b):
+    """Classic edit distance. Ranks "yat"->"yay" (1 substitution) above
+    "yat"->"yat2m" (2 insertions), which is the behavior a typo-corrector
+    actually wants - difflib's block-matching ratio() gets this backwards
+    for suffix insertions."""
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        for j, cb in enumerate(b, 1):
+            cur[j] = min(
+                prev[j] + 1,          # deletion
+                cur[j - 1] + 1,       # insertion
+                prev[j - 1] + (ca != cb),  # substitution
+            )
+        prev = cur
+    return prev[-1]
+
+
+def unknown_command_suggestions(cmd, limit=3):
+    """If the program name itself doesn't exist, fuzzy-match it against real
+    commands on this machine (by edit distance) and swap it in, keeping the
+    rest of the args. e.g. "yat -Syu" -> "yay -Syu" when `yay` is installed
+    but `yat` isn't - the same core trick `thefuck` uses.
+    """
+    tokens = cmd.split()
+    if not tokens:
+        return []
+    base = tokens[0]
+    if is_real_command(base):
+        return []
+    candidates = path_executables() | SHELL_BUILTINS | shell_known_commands()
+    max_dist = max(2, len(base) // 2)
+    hist = history_rank()
+    no_history = len(hist)  # sorts after every command actually seen in history
+    scored = sorted(
+        (
+            (levenshtein(base, c), hist.get(c, no_history), len(c), c)
+            for c in candidates
+            if c != base and abs(len(c) - len(base)) <= max_dist
+        ),
+    )
+    matches = [c for dist, _, _, c in scored if dist <= max_dist][:limit]
+    return [" ".join([m] + tokens[1:]) for m in matches]
+
+
+HINT_RE = re.compile(
+    r"(?:did you mean|most similar command is|maybe you meant|perhaps you meant)"
+    r"[:\s]*\n?\s*['\"]?([A-Za-z0-9_.:/@-]+)['\"]?",
+    re.IGNORECASE,
+)
+
+
+def hint_suggestion(cmd, output):
+    """Many CLIs (git, pip, cargo, apt...) print their own correction
+    straight into the error output. That beats guessing - use it directly.
+    """
+    m = HINT_RE.search(output or "")
+    if not m:
+        return None
+    hint = m.group(1).strip()
+    tokens = cmd.split()
+    if not tokens or not hint:
+        return None
+    best_idx, best_ratio = None, 0.0
+    for i, t in enumerate(tokens):
+        ratio = difflib.SequenceMatcher(None, t, hint).ratio()
+        if ratio > best_ratio:
+            best_ratio, best_idx = ratio, i
+    if best_idx is None or best_ratio < 0.4:
+        return None
+    new_tokens = tokens[:]
+    new_tokens[best_idx] = hint
+    return " ".join(new_tokens)
 
 
 def build_prompt(cmd, exit_code, output):
@@ -228,14 +409,28 @@ def main():
         orig_exit = os.environ.get("SHIT_PREV_EXIT", "").strip()
         if orig_exit.isdigit():
             exit_code = int(orig_exit)
-    prompt = build_prompt(cmd, exit_code, output)
-    suggestions = ask_ollama(prompt)
 
+    def add(dest, item):
+        if item and item not in dest:
+            dest.append(item)
+
+    suggestions = []
+    add(suggestions, common_typo_suggestion(cmd))
+    # highest confidence first: the tool told us directly what it meant
+    add(suggestions, hint_suggestion(cmd, output))
+    for s in unknown_command_suggestions(cmd):
+        add(suggestions, s)
+
+    # only bother the LLM if the deterministic tricks didn't fill the menu
+    if len(suggestions) < 3:
+        prompt = build_prompt(cmd, exit_code, output)
+        for s in ask_ollama(prompt) or []:
+            add(suggestions, repair_suggestion(cmd, s))
+
+    suggestions = suggestions[:3]
     if not suggestions:
         eprint("shit: no suggestions available.")
         return 1
-
-    suggestions = [repair_suggestion(cmd, s) for s in suggestions]
 
     choice = prompt_choice(suggestions)
     if choice:

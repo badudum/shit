@@ -32,8 +32,19 @@ EOF
     return 1
   fi
 
+  # let shit-cli know about aliases/functions too, not just $PATH binaries,
+  # so a typo'd alias can be fuzzy-matched the same way a typo'd binary is
+  local known_cmds hist_cmds
+  if [ -n "${ZSH_VERSION:-}" ]; then
+    known_cmds="$(print -rl -- ${(k)aliases} ${(k)functions} 2>/dev/null)"
+    hist_cmds="$(fc -l 1 2>/dev/null | awk '{print $2}' | sort | uniq -c | sort -rn | awk '{print $2}' | head -300)"
+  else
+    known_cmds="$(compgen -a; compgen -A function)"
+    hist_cmds="$(history | awk '{print $2}' | sort | uniq -c | sort -rn | awk '{print $2}' | head -300)"
+  fi
+
   local fixed
-  fixed="$(SHIT_PREV_CMD="$prev" SHIT_PREV_EXIT="$orig_status" command shit-cli)"
+  fixed="$(SHIT_PREV_CMD="$prev" SHIT_PREV_EXIT="$orig_status" SHIT_KNOWN_CMDS="$known_cmds" SHIT_HISTORY_CMDS="$hist_cmds" command shit-cli)"
   local status=$?
 
   if [ -n "$fixed" ]; then
