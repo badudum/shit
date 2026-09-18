@@ -28,7 +28,7 @@ wire_rcfile() {
 
   {
     echo ""
-    echo "# shit: fix your last broken command (https://github.com/you/shit)"
+    echo "# shit: fix your last broken command (https://github.com/badudum/shit)"
     grep -qF "$PATH_LINE" "$rcfile" 2>/dev/null || echo "$PATH_LINE"
     grep -qF "$REPO_DIR/shell/integration.sh" "$rcfile" 2>/dev/null || echo "$SOURCE_LINE"
   } >> "$rcfile"

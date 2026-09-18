@@ -9,8 +9,7 @@ $ shit
 
 Did you mean:
   1) git push
-  2) git bush --help
-  3) git branch bush
+  2) git pull
 Type a number to run it, or anything else to cancel: 1
 ```
 
@@ -34,19 +33,28 @@ Everything runs locally. Nothing you type ever leaves your machine.
 
 ## Install
 
+One command:
+
 ```
-git clone <this repo>
-cd shit
-./install.sh
+git clone https://github.com/badudum/shit.git && cd shit && ./install.sh
 ```
 
-The installer:
+The installer is entirely user-space - no `sudo`, no root, nothing installed
+system-wide. It:
 - symlinks `shit_cli.py` to `~/.local/bin/shit-cli`
-- adds `source .../shell/integration.sh` to `~/.bashrc` and `~/.zshrc`
-- installs [Ollama](https://ollama.com) if it's missing (asks first)
+- adds `~/.local/bin` to `PATH` and sources `shell/integration.sh` in
+  `~/.bashrc` and `~/.zshrc`
+- installs [Ollama](https://ollama.com) into `~/.local/bin` if it's missing
+  (no separate download/setup needed - and it won't touch an existing
+  system install if you already have `ollama` on your `PATH`)
+- runs it as a `systemd --user` service so it's there after reboots/logins
+  without needing root (falls back to a plain background process if your
+  system has no user systemd instance)
 - pulls a small model (`qwen2.5:0.5b` by default, ~400MB)
 
-Restart your shell afterwards.
+Safe to re-run any time - every step is skipped if it's already done.
+
+Restart your shell afterwards (or `source ~/.bashrc`).
 
 ## Config
 
