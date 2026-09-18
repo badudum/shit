@@ -108,15 +108,32 @@ SYSTEM_PROMPT = (
     "You are a terminal assistant that fixes broken shell commands. "
     "You will be given the command the user typed and the error/output it "
     "produced. Reply with ONLY a JSON object of the form "
-    '{"suggestions": ["corrected command 1", "corrected command 2", "corrected command 3"]}. '
-    "List 1 to 3 corrected commands ordered from most to least likely. "
-    "Each suggestion MUST be the full command line exactly as the user would "
-    "type it, including the program name - never just the sub-command or "
-    "arguments on their own. "
-    'Example: given "Typed command: git bush" with output mentioning the '
-    'command "push", respond with {"suggestions": ["git push"]}, NOT '
-    '{"suggestions": ["push"]}. '
-    "Do not include explanations, markdown fences, or any extra fields."
+    '{"reasoning": "...", "suggestions": ["corrected command 1", ...]}.\n\n'
+    "In \"reasoning\" (keep it to 1-3 short sentences, not a full essay): "
+    "list EVERY separate thing wrong with the command, not just the first "
+    "or most obvious one - a typo'd program name, a typo'd sub-command, a "
+    "misspelled argument/package/file name, a missing required flag, wrong "
+    "flag syntax, missing quoting/escaping, etc. A command can have more "
+    "than one mistake at once and all of them need fixing, not just "
+    "whichever one caused the visible error. Then in \"suggestions\": list "
+    "1 to 3 corrected commands, ordered most to least likely, each one "
+    "applying ALL the fixes from your reasoning - not just the first one. "
+    "The suggestions must be genuinely different from each other - never "
+    "repeat the exact same command twice; if you only have one good fix, "
+    "give just that one suggestion instead of padding the list.\n\n"
+    "Each suggestion MUST be the full command line exactly as the user "
+    "would type it, including the program name - never just the "
+    "sub-command or arguments on their own.\n\n"
+    'Example: typed command "pacman -S python-poetr" fails because (1) '
+    "pacman -S needs root and wasn't run with sudo, AND (2) "
+    "\"python-poetr\" isn't a real package name, it's a typo of "
+    '"python-poetry". A correct suggestion fixes BOTH: '
+    '"sudo pacman -S python-poetry" - not just "sudo pacman -S '
+    'python-poetr" (only fixed the sudo, ignored the typo) and not just '
+    '"pacman -S python-poetry" (only fixed the typo, ignored the missing '
+    "sudo).\n\n"
+    "Do not include markdown fences or any fields other than \"reasoning\" "
+    "and \"suggestions\"."
 )
 
 
@@ -343,6 +360,13 @@ def build_prompt(cmd, exit_code, output):
 RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
+        # listed first on purpose: constrained JSON generation still fills
+        # properties in schema order, so this gives the model a scratchpad
+        # to reason in *before* it has to commit to a final answer - a
+        # strict {"suggestions": [...]}-only schema forces the very first
+        # generated token to already be the final answer, with nowhere to
+        # work through multi-part fixes first.
+        "reasoning": {"type": "string"},
         "suggestions": {
             "type": "array",
             "items": {"type": "string"},
@@ -350,7 +374,7 @@ RESPONSE_SCHEMA = {
             "maxItems": 3,
         },
     },
-    "required": ["suggestions"],
+    "required": ["reasoning", "suggestions"],
 }
 
 
@@ -369,7 +393,7 @@ def ask_ollama(prompt, quiet=False):
         "prompt": prompt,
         "stream": False,
         "format": RESPONSE_SCHEMA,
-        "options": {"temperature": 0.2, "num_predict": 320},
+        "options": {"temperature": 0.2, "num_predict": 500},
     }).encode("utf-8")
 
     req = urllib.request.Request(
