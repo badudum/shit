@@ -10,10 +10,11 @@ $ shit
 Did you mean:
   1) git push
   2) git pull
-Type a number to run it, or anything else to cancel: 1
+Press a number to run it, Ctrl+C to cancel: 1
 ```
 
-Picking `1` runs `git push` in your actual shell, right there.
+Press `1` - no Enter needed - and `git push` runs in your actual shell,
+right there. Ctrl+C cancels.
 
 ## How it works
 
