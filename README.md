@@ -23,11 +23,30 @@ Picking `1` runs `git push` in your actual shell, right there.
    stdout/stderr (skipped for anything that looks destructive - `rm`, `sudo`,
    `git push --force`, `DELETE`/`POST` curls, etc. - see `DANGEROUS_PATTERNS`
    in `shit_cli.py`).
-3. The command text + captured output go to a small model running locally
-   via [Ollama](https://ollama.com), which returns up to 3 corrected
-   commands as JSON.
-4. You pick one by number and it's `eval`'d in your current shell, so `cd`,
+3. Before ever asking a model, it tries three cheap, deterministic tricks
+   that are both faster and more reliable for the common case of a typo'd
+   command:
+   - a short table of classic transposition typos (`sl` -> `ls`, `gerp` ->
+     `grep`, ...)
+   - if the program name doesn't resolve to anything real, fuzzy-matching
+     it (by edit distance) against every executable actually on your
+     `$PATH`, plus your shell aliases/functions - the same core trick
+     [`thefuck`](https://github.com/nvbn/thefuck) uses - tie-broken by your
+     own command history, so among equally-close matches it picks the one
+     you actually use
+   - parsing "did you mean"/"most similar command is" hints straight out of
+     the failing tool's own error output (git, pip, cargo, apt, ... all
+     self-report this already)
+4. Only if those don't add up to 3 suggestions does the command text +
+   captured output go to a small model running locally via
+   [Ollama](https://ollama.com) to fill in the rest.
+5. You pick one by number and it's `eval`'d in your current shell, so `cd`,
    env vars, and aliases all behave normally - it's not run in a subshell.
+
+For the most common case (a typo'd command) steps 1-3 alone produce all 3
+suggestions, so no model call happens at all - just near-instant, and
+grounded in what's actually installed on your machine rather than a small
+model's training-data guesses.
 
 Everything runs locally. Nothing you type ever leaves your machine.
 
