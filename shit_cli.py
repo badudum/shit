@@ -43,7 +43,7 @@ import urllib.error
 import urllib.request
 
 OLLAMA_URL = os.environ.get("SHIT_OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL = os.environ.get("SHIT_MODEL", "qwen2.5-coder:3b")
+MODEL = os.environ.get("SHIT_MODEL", "deepseek-coder-v2:16b")
 RERUN_TIMEOUT = float(os.environ.get("SHIT_RERUN_TIMEOUT", "5"))
 LLM_TIMEOUT = float(os.environ.get("SHIT_LLM_TIMEOUT", "30"))
 MAX_OUTPUT_CHARS = 1500

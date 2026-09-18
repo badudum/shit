@@ -75,8 +75,8 @@ system-wide. It:
 - runs it as a `systemd --user` service so it's there after reboots/logins
   without needing root (falls back to a plain background process if your
   system has no user systemd instance)
-- pulls a small model for the LLM fallback (`qwen2.5-coder:3b` by default,
-  ~1.9GB)
+- pulls a model for the LLM fallback (`deepseek-coder-v2:16b` by default,
+  ~8.9GB - see Config below for lighter/faster alternatives)
 
 Safe to re-run any time - every step is skipped if it's already done.
 
@@ -88,7 +88,7 @@ All optional, set as env vars before sourcing (e.g. in `.bashrc`):
 
 | Variable              | Default                   | What it does                          |
 |------------------------|----------------------------|----------------------------------------|
-| `SHIT_MODEL`           | `qwen2.5-coder:3b`         | Ollama model to use for the LLM fallback |
+| `SHIT_MODEL`           | `deepseek-coder-v2:16b`    | Ollama model to use for the LLM fallback |
 | `SHIT_OLLAMA_URL`      | `http://127.0.0.1:11434`   | Ollama API base URL                    |
 | `SHIT_RERUN_TIMEOUT`   | `5`                        | Seconds before giving up re-running the failed command |
 | `SHIT_LLM_TIMEOUT`     | `30`                       | Seconds to wait for the model's response |
@@ -97,15 +97,23 @@ The model always runs in the background, but since it never blocks the
 menu (see above), it's worth spending a bigger, slower-but-smarter model
 there rather than optimizing purely for speed - you'll rarely be staring
 at the spinner waiting on it. On this tradeoff:
-- `qwen2.5-coder:1.5b` (~1GB) - if you want something lighter/faster and
-  can live with a lower ceiling on complex commands.
-- `qwen2.5-coder:3b` (~1.9GB, default) - clearly outperforms smaller models
-  on longer, multi-flag commands and subtle mistakes (e.g. correctly fixing
-  a missing `find ... -exec ... +` terminator or a malformed
-  `-H "Authorization Bear TOKEN"` curl header) while still running in a
-  few seconds on a modern CPU.
-- `qwen2.5-coder:7b` (~4.7GB) - best accuracy if you don't mind ~5-10s+ per
-  LLM call (CPU-only) and have the RAM to spare.
+- `qwen2.5-coder:1.5b` (~1GB) - lightest/fastest, lower ceiling on complex
+  commands.
+- `qwen2.5-coder:3b` (~1.9GB) - clearly outperforms smaller models on
+  longer, multi-flag commands and subtle mistakes, still just a few
+  seconds per call on CPU. No known correctness quirks (see caveat below
+  about the current default).
+- `deepseek-coder-v2:16b` (~8.9GB, default) - MoE with ~2.4B active
+  params/token, so despite being much bigger it's not dramatically slower
+  than the 3b model once warm (~3-7s typical here). Best of this lineup at
+  things like fixing a malformed `-H "Authorization Bear TOKEN"` curl
+  header or an unclosed paren. Has a known issue: it consistently emits an
+  *unescaped* `;` for `find ... -exec ... ;`-style terminators instead of
+  `\;` or `{} +`, which gets eaten by the shell as a command separator
+  before `find` ever sees it - silently reproducing the very error it was
+  meant to fix. `qwen2.5-coder:3b` gets this one right.
+- `qwen2.5-coder:7b` (~4.7GB) - best accuracy in the qwen lineup if you
+  don't mind ~5-10s+ per call and have the RAM to spare.
 
 To switch: `ollama pull <model>` then `export SHIT_MODEL=<model>` in your
 shell rc file (after the `source .../shell/integration.sh` line).
@@ -120,6 +128,9 @@ shell rc file (after the `source .../shell/integration.sh` line).
   idle) is slower while the model loads into memory; after that it's fast.
 - Only pulls the previous command from shell history, so it won't work as
   the very first command in a fresh shell session.
+- The default model (`deepseek-coder-v2:16b`) has a known quirk on
+  `find ... -exec` style commands - see Config above. Always glance at a
+  suggestion before picking it, especially for anything with `-exec`.
 - The live spinner/menu needs a real terminal (both stdin and stderr as
   ttys). Piped/non-interactive input (scripts, tests) falls back to a
   static menu that only waits on the model if the deterministic tricks
